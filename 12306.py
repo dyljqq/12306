@@ -16,13 +16,8 @@ disable_warnings(InsecureRequestWarning)
 BASE_URL = 'https://kyfw.12306.cn/'
 
 
-State = namedtuple('State', ['abbr', 'name', 'code', 'pinyin', 'pyabbr'])
-
 USER_NAME = '18868814424'
 PASSWORD = 'dyljqq21'
-
-FROM = '杭州'
-TO = '丽水'
 
 TYPE_VERIFY_CAPTCHA_FAILURE = 0
 TYPE_VERIFY_CAPTCHA_SUCCESS = 1
@@ -30,14 +25,84 @@ TYPE_VERIFY_CAPTCHA_SUCCESS = 1
 TYPE_LOGIN_FAILURE = 0
 TYPE_LOGIN_SUCCESS = 1
 
+FROM_STATE_NAME = '杭州'
+TO_STATE_NAME = '丽水'
+
 
 MAX_TRY_NUM = 3
+
+
+class State(object):
+    def __init__(self, abbr, name, code, pinyin, pyabbr):
+        self.abbr = abbr
+        self.name = name
+        self.code = code
+        self.pinyin = pinyin
+        self.pyabbr = pyabbr
 
 
 class Passenger(object):
     def __init__(self, name, id_number):
         self.name = name
         self.id_number = id_number
+
+
+class TicketParams(object):
+    def __init__(self, fr, to, date, purpose_code='ADULT'):
+        self.fr = fr
+        self.to = to
+        self.date = date
+        self.purpose_code = purpose_code
+
+    def to_param(self):
+        arr = [
+            'leftTicketDTO.train_date=%s' % self.date,
+            'leftTicketDTO.from_station=%s' % self.fr.code,
+            'leftTicketDTO.to_station=%s' % self.to.code,
+            'purpose_codes=%s' % self.purpose_code
+        ]
+        return '&'.join(arr)
+
+
+class TicketInfo(object):
+    def __init__(self, train_no, train_code, start_station_tel_code, end_station_code,
+                 from_station_code, to_station_code, start_time, arrive_time, cost_time, can_web_buy,
+                 yp_info, start_train_date, train_seat_type, location_code, from_station_no,
+                 to_station_no, is_support_card, controlled_train_flag, swt, ydz, erdz, gjrw,
+                 rwy, dw, ywer, rz, yz, wz, other):
+        print start_train_date
+        self.train_no = train_no
+        self.train_code = train_code
+        self.start_station_tel_code = start_station_tel_code
+        self.end_station_code = end_station_code
+        self.from_station_code = from_station_code
+        self.to_station_code = to_station_code
+        self.start_time = start_time
+        self.arrive_time = arrive_time
+        self.cost_time = cost_time  # 历时多久
+        self.can_web_buy = can_web_buy
+        self.yp_info = yp_info
+        self.start_train_date = start_train_date
+        self.train_seat_type = train_seat_type
+        self.location_code = location_code
+        self.from_station_code = from_station_code
+        self.to_station_code = to_station_code
+        self.is_support_card = is_support_card
+        self.controlled_train_flag = controlled_train_flag
+        self.swt = swt  # 商务特等座
+        self.ydz = ydz  # 一等座
+        self.erdz = erdz  # 二等座
+        self.gjrw = gjrw  # 高级软卧
+        self.rwy = rwy  # 软卧一等座
+        self.dw = dw  # 动卧
+        self.ywer = ywer  # 硬卧二等座
+        self.rz = rz  # 软座
+        self.yz = yz  # 硬座
+        self.wz = wz  # 无座
+        self.other = other  # 其他
+
+    def is_high_train(self):
+        return self.train_code[0] == 'G'
 
 
 class BaseTicket(object):
@@ -72,11 +137,71 @@ class BaseTicket(object):
             print 'error: %s' % e
 
 
+class Train(BaseTicket):
+
+    def __init__(self, ticket_params=None):
+        super(Train, self).__init__()
+
+        self.ticket_params = ticket_params
+        self.param_str = self.ticket_params.to_param()
+        
+        self.setup()
+
+    def setup(self):
+        self.init_query_ticket()
+        self.query_http_zf()
+        self.query_ticket_log()
+
+        self.tickets = []
+        tks = self.query_tickets()
+        for tk in tks[:1]:
+            rs = tk.split('|')
+            if not rs:
+                continue
+            ticket = TicketInfo(*rs[2:31])
+            self.tickets.append(ticket)
+
+    def init_query_ticket(self):
+        url = BASE_URL + 'otn/leftTicket/init?linktypeid=dc&fs=杭州,HZH&ts=丽水,USH&date=2019-01-10&flag=N,N,Y'
+        return self.get(url)
+
+    def query_http_zf(self):
+        url = BASE_URL + 'otn/HttpZF/GetJS'
+        r = self.get(url)
+        return r.content
+
+    def query_ticket_log(self):
+        url = BASE_URL + 'otn/leftTicket/log?' + self.param_str
+        r = self.get(url)
+        return r.json()
+
+    def query_tickets(self):
+        url = BASE_URL + 'otn/leftTicket/queryZ?' + self.param_str
+        r = self.get(url)
+        data = r.json()
+        data = data.get('data', {})
+        if not data:
+            return []
+        
+        flag = data.get('flag', 0)
+        if int(flag) != 1:
+            return []
+        
+        return data.get('result', [])
+
+    # 搜索特定条件的车票
+    def get_tickets(self, is_high_train=True, start_time=''):
+        for ticket in self.tickets:
+            if is_high_train and not ticket.is_high_train:
+                continue
+
+
 class Station(BaseTicket):
 
     def __init__(self):
         super(Station, self).__init__()
 
+        self.state_dict = {}
         self.states = self.init_station()
 
     def init_station(self):
@@ -89,20 +214,25 @@ class Station(BaseTicket):
 
         states = []
         stations = data.split('@')
-        for station in stations[:2]:
+        for station in stations:
             items = station.split('|')
             if len(items) < 5:
                 continue
 
+            name = items[1]
             state = State(
                 abbr=items[0],
-                name=items[1],
+                name=name,
                 code=items[2],
                 pinyin=items[3],
                 pyabbr=items[4]
             )
+            self.state_dict[name] = state
             states.append(state)
         return states
+
+    def get_state_by_name(self, state_name):
+        return self.state_dict.get(state_name, '')
 
 
 class User(BaseTicket):
@@ -207,7 +337,7 @@ class User(BaseTicket):
         }
         r = self.post(url, data=data)
         d = r.json()
-        passengers = r.get('data', {}).get('normal_passengers', [])
+        passengers = d.get('data', {}).get('normal_passengers', [])
         self.passengers = [Passenger(name=passenger['passenger_name'], id_number=passenger['passenger_id_no']) for passenger in passengers]
 
     def check_uam(self):
@@ -282,8 +412,13 @@ class User(BaseTicket):
 
 
 def main():
-    # station = Station()
-    user = User(user_name=USER_NAME, password=PASSWORD)
+    station = Station()
+    # user = User(user_name=USER_NAME, password=PASSWORD)
+    fr = station.get_state_by_name(FROM_STATE_NAME)
+    to = station.get_state_by_name(TO_STATE_NAME)
+    date = '2019-01-11'
+    ticket_param = TicketParams(fr=fr, to=to, date=date)
+    train = Train(ticket_params=ticket_param)
 
 
 if __name__ == '__main__':
